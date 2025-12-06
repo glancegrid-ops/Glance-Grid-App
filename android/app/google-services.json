@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "526256740736",
+    "project_id": "glance-grid",
+    "storage_bucket": "glance-grid.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:526256740736:android:e13c5ad0d72d304f1e0965",
+        "android_client_info": {
+          "package_name": "com.example.glance_grid"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCNmrKN2oT-6U7WX6U9nnNIhZ0bg6wUuW4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:526256740736:android:9558f7f2f564cdec1e0965",
+        "android_client_info": {
+          "package_name": "com.example.glance_grid_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCNmrKN2oT-6U7WX6U9nnNIhZ0bg6wUuW4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
