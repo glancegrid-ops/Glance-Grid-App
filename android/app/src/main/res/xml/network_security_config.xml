@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<domain-config cleartextTrafficPermitted="false">
+  <!-- Firebase Storage and other Google services use HTTPS -->
+  <domain includeSubdomains="true">firebasestorage.googleapis.com</domain>
+  <domain includeSubdomains="true">commondatastorage.googleapis.com</domain>
+</domain-config>
