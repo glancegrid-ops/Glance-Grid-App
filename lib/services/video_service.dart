@@ -1,5 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import '../models/video_model.dart';
+import '../models/file_model.dart';
 
 
 class VideoService {
@@ -9,19 +9,20 @@ class VideoService {
   final CollectionReference _videosCollection =
       FirebaseFirestore.instance.collection('videos');
 
-  Future<List<VideoModel>> fetchVideosForDevice(String deviceId) async {
+  Future<List<FileModel>> fetchVideosForDevice(String deviceId) async {
     final snapshot = await _videosCollection.get();
-    final List<VideoModel> videos = [];
+    final List<FileModel> items = [];
 
     for (var doc in snapshot.docs) {
       final data = doc.data() as Map<String, dynamic>;
-      final video = VideoModel.fromJson(data, docId: doc.id);
+      final file = FileModel.fromJson(data, docId: doc.id);
 
       // Filter: Check if deviceId is in the allowed list
-      if (video.userIds.contains(deviceId)) {
-        videos.add(video);
+      if (file.userIds.contains(deviceId)) {
+        items.add(file);
       }
     }
-    return videos;
+    return items;
   }
 }
+

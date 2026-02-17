@@ -29,6 +29,14 @@ class RecorderManager with WidgetsBindingObserver {
   // prefix saved clip filenames so they are associated with the video.
   String? _currentVideoDocId;
 
+  // Add a lock to prevent concurrent camera operations
+  bool _isProcessingCamera = false;
+
+  // The last temporary segment file path returned by stopVideoRecording().
+  // This is set when segments are rotated/stopped so notifySegmentEnd()
+  // can save that file even if the camera is not currently recording.
+  String? _lastSegmentTempPath;
+
   Duration? _segmentDuration;
   Timer? _segmentTimer;
   // Notifier for UI to show recording indicator
@@ -73,6 +81,7 @@ class RecorderManager with WidgetsBindingObserver {
     final alreadyConsented = prefs.getBool('recorder_user_consented') ?? false;
 
     if (!alreadyConsented) {
+      if (!context.mounted) return;
       final consent = await showDialog<bool>(
         context: context,
         barrierDismissible: false,
@@ -150,6 +159,58 @@ class RecorderManager with WidgetsBindingObserver {
     }
   }
 
+  // Helper to restart camera on fatal errors
+  Future<void> _restartCamera() async {
+    // Force wait for lock to clear
+    int retries = 0;
+    while (_isProcessingCamera && retries < 20) {
+      await Future.delayed(const Duration(milliseconds: 100));
+      retries++;
+    }
+    _isProcessingCamera = true;
+
+    debugPrint('♻ restarting camera subsystem...');
+    try {
+      if (_cameraController != null) {
+        await _cameraController!.dispose();
+      }
+    } catch (e) {
+      debugPrint('Error disposing camera during restart: $e');
+    }
+    _cameraController = null;
+    _isRecording = false;
+    recordingNotifier.value = false;
+    _segmentTimer?.cancel();
+
+    // Increased delay to 2000ms to allow hardware to fully reset
+    await Future.delayed(const Duration(milliseconds: 2000));
+
+    try {
+      final cameras = await availableCameras();
+      _frontCamera = cameras.firstWhere(
+        (c) => c.lensDirection == CameraLensDirection.front,
+        orElse: () => cameras.isNotEmpty
+            ? cameras.first
+            : throw Exception('No camera available'),
+      );
+      _cameraController = CameraController(
+        _frontCamera!,
+        ResolutionPreset.medium,
+        enableAudio: true,
+        imageFormatGroup: ImageFormatGroup.yuv420,
+      );
+      await _cameraController!.initialize();
+    } catch (e) {
+      debugPrint('Fatal: Failed to restart camera: $e');
+    } finally {
+      _isProcessingCamera = false;
+      // Start recording now that lock is free and controller is ready
+      if (_cameraController != null && _cameraController!.value.isInitialized) {
+        await _startRecordingSegment();
+      }
+    }
+  }
+
   // Set the segment duration; used to rotate saved files.
   void setSegmentDuration(Duration? dur) {
     _segmentDuration = dur;
@@ -163,24 +224,73 @@ class RecorderManager with WidgetsBindingObserver {
   }
 
   Future<void> _startRecordingSegment() async {
-    if (!_consented ||
-        _cameraController == null ||
-        !_cameraController!.value.isInitialized)
-      return;
-    if (_isRecording) return;
+    // Wait for lock instead of returning immediately
+    int retries = 0;
+    while (_isProcessingCamera && retries < 20) {
+      await Future.delayed(const Duration(milliseconds: 100));
+      retries++;
+    }
 
-    try {
-      await _cameraController!.startVideoRecording();
-      _isRecording = true;
-      recordingNotifier.value = true;
-      _startSegmentTimer();
+    if (_isProcessingCamera) {
       debugPrint(
-        'Started recording to segment (in-memory) — file will be saved on stop',
+        '⚠ _startRecordingSegment: Camera busy too long. Aborting start.',
       );
-    } catch (e) {
-      debugPrint('Failed to start recording: $e');
-      _isRecording = false;
-      recordingNotifier.value = false;
+      return;
+    }
+
+    _isProcessingCamera = true;
+    try {
+      if (!_consented ||
+          _cameraController == null ||
+          !_cameraController!.value.isInitialized) {
+        return;
+      }
+      if (_isRecording) {
+        // Already recording, fine.
+        return;
+      }
+
+      // If the controller thinks it's already recording but our flag is false
+      if (_cameraController!.value.isRecordingVideo) {
+        _isRecording = true;
+        recordingNotifier.value = true;
+        _startSegmentTimer();
+        debugPrint('Recovered recording state: Camera was already recording.');
+        return;
+      }
+
+      try {
+        await _cameraController!.startVideoRecording();
+        _isRecording = true;
+        recordingNotifier.value = true;
+        _startSegmentTimer();
+        debugPrint(
+          'Started recording to segment (in-memory) — file will be saved on stop',
+        );
+      } catch (e) {
+        if (e is CameraException &&
+            e.description != null &&
+            e.description!.contains('already started')) {
+          debugPrint(
+            'Caught "already started" exception. Treating as recording.',
+          );
+          _isRecording = true;
+          recordingNotifier.value = true;
+          _startSegmentTimer();
+        } else {
+          debugPrint('Failed to start recording: $e');
+          _isRecording = false;
+          recordingNotifier.value = false;
+          // Try to restart if it's a serious error
+          if (e is CameraException) {
+            debugPrint('Fatal error starting recording. Scheduling restart.');
+            // Schedule restart after lock release
+            Future.delayed(const Duration(milliseconds: 500), _restartCamera);
+          }
+        }
+      }
+    } finally {
+      _isProcessingCamera = false;
     }
   }
 
@@ -203,47 +313,76 @@ class RecorderManager with WidgetsBindingObserver {
   }
 
   Future<void> _rotateSegment() async {
-    if (!_isRecording || _cameraController == null) return;
+    if (_isProcessingCamera)
+      return; // Skip if busy (e.g. notifySegmentEnd running)
+    _isProcessingCamera = true;
     try {
-      await _cameraController!.stopVideoRecording();
-      // Don't save the clip here - only save when notifySegmentEnd() is called
-      // This ensures clips are only saved when a video completes
-    } catch (e) {
-      debugPrint('Failed to stop recording segment: $e');
-    }
+      if (!_isRecording || _cameraController == null) return;
 
-    // Start next segment immediately
-    _isRecording = false;
-    recordingNotifier.value = false;
-    _segmentTimer?.cancel();
-    await Future.delayed(const Duration(milliseconds: 100));
-    await _startRecordingSegment();
+      try {
+        try {
+          final tmp = await _cameraController!.stopVideoRecording();
+          // Record the temp path for potential later saving
+          _lastSegmentTempPath = tmp.path;
+        } catch (e) {
+          debugPrint('Failed to stop recording segment: $e');
+        }
+        // Don't save the clip here - only save when notifySegmentEnd() is called
+        // This ensures clips are only saved when a video completes
+      } catch (e) {
+        debugPrint('Failed during rotateSegment stop: $e');
+      }
+
+      // Start next segment immediately
+      _isRecording = false;
+      recordingNotifier.value = false;
+      _segmentTimer?.cancel();
+    } finally {
+      _isProcessingCamera = false;
+
+      // Increased delay to drain camera fully
+      await Future.delayed(const Duration(milliseconds: 1000));
+      await _startRecordingSegment();
+    }
   }
 
   Future<void> _stopRecordingIfNeeded() async {
-    _segmentTimer?.cancel();
-    if (_isRecording && _cameraController != null) {
-      try {
-        final file = await _cameraController!.stopVideoRecording();
-        // move to documents
-        final dir = await getApplicationDocumentsDirectory();
-        final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
-        // Always save only if docId is available
-        if (_currentVideoDocId != null && _currentVideoDocId!.isNotEmpty) {
-          final newPath = '${dir.path}/${_currentVideoDocId}_$ts.mp4';
-          try {
-            final src = File(file.path);
-            await src.copy(newPath);
-            debugPrint('Saved final clip with docId: $newPath');
-          } catch (e) {
-            debugPrint('Failed to copy final segment file: $e');
+    // Wait for ongoing operations best effort
+    if (_isProcessingCamera) {
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+
+    _isProcessingCamera = true;
+    try {
+      _segmentTimer?.cancel();
+      if (_isRecording && _cameraController != null) {
+        try {
+          final file = await _cameraController!.stopVideoRecording();
+          // record the temp path so notifySegmentEnd can use it if needed
+          _lastSegmentTempPath = file.path;
+
+          // move to documents
+          final dir = await getApplicationDocumentsDirectory();
+          final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
+          // Always save only if docId is available
+          if (_currentVideoDocId != null && _currentVideoDocId!.isNotEmpty) {
+            final newPath = '${dir.path}/${_currentVideoDocId}_$ts.mp4';
+            try {
+              final src = File(file.path);
+              await src.copy(newPath);
+              debugPrint('Saved final clip with docId: $newPath');
+            } catch (e) {
+              debugPrint('Failed to copy final segment file: $e');
+            }
           }
+        } catch (e) {
+          debugPrint('Error stopping recording: $e');
         }
-      } catch (e) {
-        debugPrint('Error stopping recording: $e');
+        _isRecording = false;
+        recordingNotifier.value = false;
       }
-      _isRecording = false;
-      recordingNotifier.value = false;
+    } finally {
+      _isProcessingCamera = false;
     }
   }
 
@@ -260,39 +399,112 @@ class RecorderManager with WidgetsBindingObserver {
 
   // Called by parent when an ad/video finishes playing so the recorder can
   // save the segment as a clip.
-  Future<void> notifySegmentEnd() async {
-    if (!_isRecording) return;
-    _segmentTimer?.cancel();
+  /// Save the most recent recording segment when a file finishes playing.
+  ///
+  /// If `docId` is provided it will be used; otherwise the recorder's
+  /// `_currentVideoDocId` is used. Passing the docId from the UI avoids
+  /// races where the UI's start event hasn't yet updated the recorder state.
+  Future<void> notifySegmentEnd([String? docId]) async {
+    final captureDocId = docId ?? _currentVideoDocId; // prefer passed docId
 
-    try {
-      final file = await _cameraController!.stopVideoRecording();
-      // Save the clip only when video ends
-      final dir = await getApplicationDocumentsDirectory();
-      final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
-
-      if (_currentVideoDocId != null && _currentVideoDocId!.isNotEmpty) {
-        final newPath = '${dir.path}/${_currentVideoDocId}_$ts.mp4';
-        try {
-          final src = File(file.path);
-          await src.copy(newPath);
-          debugPrint('✓ Saved clip with docId at video end: $newPath');
-        } catch (e) {
-          debugPrint('✗ Failed to copy segment file: $e');
-        }
-      } else {
-        debugPrint(
-          '✗ Cannot save clip: docId is null or empty. Current docId: "$_currentVideoDocId"',
-        );
-      }
-    } catch (e) {
-      debugPrint('✗ Failed to save segment at video end: $e');
+    // Wait for ongoing operations to complete (up to 2 seconds)
+    int retries = 0;
+    while (_isProcessingCamera && retries < 20) {
+      await Future.delayed(const Duration(milliseconds: 100));
+      retries++;
     }
 
-    // Restart recording for next segment
-    _isRecording = false;
-    recordingNotifier.value = false;
-    await Future.delayed(const Duration(milliseconds: 100));
-    await _startRecordingSegment();
+    if (_isProcessingCamera) {
+      debugPrint(
+        '⚠ notifySegmentEnd: Camera busy too long. Skipping save to prevent crash.',
+      );
+      return;
+    }
+
+    _isProcessingCamera = true;
+    try {
+      // Check internal flag AND official controller state just in case
+      final isActuallyRecording =
+          _isRecording || (_cameraController?.value.isRecordingVideo ?? false);
+
+      // If we're not currently recording, we may still have a recently
+      // produced temporary segment (from rotation) at `_lastSegmentTempPath`.
+      if (!isActuallyRecording && _lastSegmentTempPath == null) {
+        debugPrint(
+          '⚠ notifySegmentEnd called but not recording and no temp segment available. Skipping. (DocID: $captureDocId)',
+        );
+        return;
+      }
+
+      _segmentTimer?.cancel();
+
+      try {
+        final dir = await getApplicationDocumentsDirectory();
+        final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
+
+        String? tempPath;
+
+        if (isActuallyRecording) {
+          try {
+            final file = await _cameraController!.stopVideoRecording();
+            tempPath = file.path;
+            // store for potential later use
+            _lastSegmentTempPath = tempPath;
+          } catch (e) {
+            debugPrint('✗ Failed to stop recording for save: $e');
+          }
+        } else {
+          tempPath = _lastSegmentTempPath;
+        }
+
+        if (tempPath != null && tempPath.isNotEmpty) {
+          if (captureDocId != null && captureDocId.isNotEmpty) {
+            final newPath = '${dir.path}/${captureDocId}_$ts.mp4';
+            try {
+              final src = File(tempPath);
+              if (await src.exists()) {
+                await src.copy(newPath);
+                debugPrint('✓ Saved clip with docId: $newPath');
+                // clear last temp after successful save
+                try {
+                  await src.delete();
+                } catch (_) {}
+                _lastSegmentTempPath = null;
+              } else {
+                debugPrint('✗ Temp segment file does not exist: $tempPath');
+              }
+            } catch (e) {
+              debugPrint('✗ Failed to copy segment file: $e');
+            }
+          } else {
+            debugPrint(
+              '✗ Cannot save clip: docId is null or empty. (Captured: "$captureDocId")',
+            );
+          }
+        } else {
+          debugPrint('✗ No temp segment available to save.');
+        }
+
+        // Restart recording for next segment
+        _isRecording = false;
+        recordingNotifier.value = false;
+      } on Exception catch (e) {
+        _isProcessingCamera = false;
+        // Increase delay to 1000ms to give camera hardware time to drain/reset
+        await Future.delayed(const Duration(milliseconds: 1000));
+        await _startRecordingSegment();
+      } catch (e) {
+        debugPrint('Unexpected error in notifySegmentEnd: $e');
+      }
+    } catch (e) {
+      debugPrint('Unexpected error in notifySegmentEnd: $e');
+    } finally {
+      // Ensure we release processing lock and resume recording loop.
+      _isProcessingCamera = false;
+      // Small delay to give camera hardware time to drain/reset
+      await Future.delayed(const Duration(milliseconds: 1000));
+      await _startRecordingSegment();
+    }
   }
 
   /// Returns the saved clips directory path. Useful for building a UI button

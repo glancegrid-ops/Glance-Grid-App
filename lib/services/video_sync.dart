@@ -7,27 +7,27 @@ class VideoSync {
   static final instance = VideoSync._();
 
   /// Fetch Firestore `videos` collection metadata without downloading.
-  /// Each doc must have a `videoUrl` field (network URL to the video).
-  /// Returns { 'items': List<Map<String,String>> }
-  /// Items contain: 'path' (videoUrl), 'docId' (Firestore doc ID)
+  /// Each doc must have a `videoUrl` or `url` field.
+  /// Returns { 'items': List<Map<String,dynamic>> }
   Future<Map<String, Object>> syncWithFirestore() async {
     final firestore = FirebaseFirestore.instance;
 
     try {
       final remote = await firestore.collection('videos').get();
-      final List<Map<String, String>> items = [];
+      final List<Map<String, dynamic>> items = [];
 
-      // Simply fetch metadata from Firestore without downloading
       for (final doc in remote.docs) {
         final docId = doc.id;
         final data = doc.data();
-        final videoUrl = data['videoUrl'] as String?;
+        // Support legacy 'videoUrl' and new 'url'
+        final url = (data['url'] as String?) ?? (data['videoUrl'] as String?);
+        final type = (data['type'] as String?) ?? 'video';
 
-        if (videoUrl == null || videoUrl.isEmpty) {
+        if (url == null || url.isEmpty) {
           continue;
         }
 
-        items.add({'path': videoUrl, 'docId': docId});
+        items.add({'path': url, 'docId': docId, 'type': type});
       }
 
       return {'items': items};
@@ -36,15 +36,24 @@ class VideoSync {
     }
   }
 
-  /// Download a single video on-demand by docId and videoUrl.
+  /// Download a single file on-demand by docId and url.
   /// Returns the local file path if successful, null otherwise.
-  Future<String?> downloadSingleVideo(String docId, String videoUrl) async {
+  Future<String?> downloadSingleFile(String docId, String url, {String? type}) async {
     try {
       final dir = await getApplicationDocumentsDirectory();
-      final videosDir = Directory('${dir.path}/videos');
-      if (!await videosDir.exists()) await videosDir.create(recursive: true);
+      
+      final isImage = type == 'image';
+      final folderName = isImage ? 'images' : 'videos';
+      final directory = Directory('${dir.path}/$folderName');
+      
+      if (!await directory.exists()) await directory.create(recursive: true);
 
-      final localPath = '${videosDir.path}/${docId}_video.mp4';
+      // Simple extension check or assumption based on type
+      // For videos we used .mp4. For images we will use .jpg (or try to detect from url if possible).
+      // Assuming generic cache file for now.
+      final extension = isImage ? '.jpg' : '.mp4';
+      
+      final localPath = '${directory.path}/${docId}_file$extension';
       final localFile = File(localPath);
 
       // If already exists, return immediately
@@ -52,8 +61,8 @@ class VideoSync {
         return localPath;
       }
 
-      // Download the video
-      final response = await HttpClient().getUrl(Uri.parse(videoUrl));
+      // Download the file
+      final response = await HttpClient().getUrl(Uri.parse(url));
       final httpResponse = await response.close();
 
       if (httpResponse.statusCode == 200) {
@@ -66,5 +75,10 @@ class VideoSync {
     } catch (e) {
       return null;
     }
+  }
+
+  // Legacy support for older calls if any remain
+  Future<String?> downloadSingleVideo(String docId, String videoUrl) {
+    return downloadSingleFile(docId, videoUrl, type: 'video');
   }
 }

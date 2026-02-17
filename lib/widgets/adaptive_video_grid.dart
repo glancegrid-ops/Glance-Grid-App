@@ -4,21 +4,26 @@ import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 import '../services/video_sync.dart';
 
-class VideoGridItem extends StatefulWidget {
-  final String videoUrl;
-  final String videoId; // docId for recorder
-  final Duration? videoDuration;
-  final ValueChanged<String>? onStarted; // returns videoId
-  final ValueChanged<String>? onCompleted; // returns videoId
-  final VoidCallback onDurationComplete;
-  final ValueChanged<double>? onProgress;
-  final ValueChanged<Duration?>? onVideoDuration;
+import 'dart:async'; // Add this for Timer
 
-  const VideoGridItem({
+class FileGridItem extends StatefulWidget {
+  final String url;
+  final String docId; // docId for recorder
+  final String type; // 'video' or 'image'
+  final int duration; // duration in seconds
+  final ValueChanged<String>? onStarted; // returns docId
+  final ValueChanged<String>? onCompleted; // returns docId
+  final VoidCallback onDurationComplete; // helper to go next
+  final ValueChanged<double>? onProgress;
+  final ValueChanged<Duration?>?
+  onVideoDuration; // mostly for video recorder sync
+
+  const FileGridItem({
     super.key,
-    required this.videoUrl,
-    required this.videoId,
-    this.videoDuration,
+    required this.url,
+    required this.docId,
+    required this.type,
+    required this.duration,
     this.onStarted,
     this.onCompleted,
     required this.onDurationComplete,
@@ -27,11 +32,17 @@ class VideoGridItem extends StatefulWidget {
   });
 
   @override
-  State<VideoGridItem> createState() => _VideoGridItemState();
+  State<FileGridItem> createState() => _FileGridItemState();
 }
 
-class _VideoGridItemState extends State<VideoGridItem> {
-  late VideoPlayerController _controller;
+class _FileGridItemState extends State<FileGridItem> {
+  // Video specific
+  VideoPlayerController? _videoController;
+
+  // Image specific
+  Timer? _imageTimer;
+  Timer? _progressTimer;
+
   bool _isInitialized = false;
   bool _onCompletedCalled = false;
 
@@ -42,81 +53,128 @@ class _VideoGridItemState extends State<VideoGridItem> {
   }
 
   @override
-  void didUpdateWidget(VideoGridItem oldWidget) {
+  void didUpdateWidget(FileGridItem oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // If the video URL changed (e.g., from network to local after download), reinitialize
-    if (oldWidget.videoUrl != widget.videoUrl) {
-      _controller.removeListener(_onControllerUpdate);
-      _controller.pause();
-      _controller.dispose();
+    // If the URL changed (e.g., from network to local after download), reinitialize
+    if (oldWidget.url != widget.url) {
+      _disposeControllers();
       _isInitialized = false;
       _onCompletedCalled = false;
       _tryInitialize();
     }
   }
 
+  void _disposeControllers() {
+    _videoController?.removeListener(_onVideoControllerUpdate);
+    _videoController?.pause();
+    _videoController?.dispose();
+    _videoController = null;
+
+    _imageTimer?.cancel();
+    _imageTimer = null;
+
+    _progressTimer?.cancel();
+    _progressTimer = null;
+  }
+
   Future<void> _tryInitialize() async {
     try {
-      final isLocalFile =
-          widget.videoUrl.startsWith('/') ||
-          widget.videoUrl.contains('documents');
-
-      if (isLocalFile) {
-        _controller = VideoPlayerController.file(File(widget.videoUrl));
+      if (widget.type == 'image') {
+        _initializeImage();
       } else {
-        _controller = VideoPlayerController.networkUrl(
-          Uri.parse(widget.videoUrl),
-        );
+        await _initializeVideo();
       }
-
-      await _controller.initialize();
-      if (!mounted) return;
-
-      setState(() {
-        _isInitialized = true;
-      });
-
-      // Report duration to parent
-      final dur = _controller.value.duration;
-      widget.onVideoDuration?.call(dur > Duration.zero ? dur : null);
-
-      _controller.play();
-      // Pass the stable videoId instead of potential local path
-      widget.onStarted?.call(widget.videoId);
-
-      _addControllerListener();
     } catch (e) {
-      // If it's a local file that failed to initialize, delete it and retry with network URL
-      if (widget.videoUrl.startsWith('/') ||
-          widget.videoUrl.contains('documents')) {
-        try {
-          final file = File(widget.videoUrl);
-          if (await file.exists()) {
-            await file.delete();
-            debugPrint('Deleted corrupted local file: ${widget.videoUrl}');
-          }
-
-          // Request re-download from VideoSync (handled by parent logic usually)
-          // For now just error out or let parent handle retry logic
-        } catch (deleteError) {
-          debugPrint('Error handling corrupted file: $deleteError');
-        }
-      }
+      debugPrint('Error initializing file item: $e');
+      // If it's a local file that failed, logic to delete/retry could go here similar to before
     }
   }
 
-  void _addControllerListener() {
-    _controller.removeListener(_onControllerUpdate);
-    _controller.addListener(_onControllerUpdate);
+  void _initializeImage() {
+    setState(() {
+      _isInitialized = true;
+    });
+
+    // Execute state updates after the current frame to avoid build conflicts
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+
+      // Notify started
+      widget.onStarted?.call(widget.docId);
+
+      // Default 10s if 0
+      final durationSeconds = widget.duration > 0 ? widget.duration : 10;
+      final totalDuration = Duration(seconds: durationSeconds);
+
+      // Report "video duration" to the parent
+      widget.onVideoDuration?.call(totalDuration);
+
+      final startTime = DateTime.now();
+
+      _progressTimer = Timer.periodic(const Duration(milliseconds: 100), (
+        timer,
+      ) {
+        if (!mounted) {
+          timer.cancel();
+          return;
+        }
+        final elapsed = DateTime.now().difference(startTime);
+        final progress = (elapsed.inMilliseconds / totalDuration.inMilliseconds)
+            .clamp(0.0, 1.0);
+        widget.onProgress?.call(progress);
+
+        if (progress >= 1.0) {
+          timer.cancel();
+        }
+      });
+
+      _imageTimer = Timer(totalDuration, () {
+        if (!mounted) return;
+        if (!_onCompletedCalled) {
+          _onCompletedCalled = true;
+          widget.onCompleted?.call(widget.docId);
+          widget.onDurationComplete();
+        }
+      });
+    });
   }
 
-  void _onControllerUpdate() {
+  Future<void> _initializeVideo() async {
+    final isLocalFile =
+        widget.url.startsWith('/') || widget.url.contains('documents');
+
+    if (isLocalFile) {
+      _videoController = VideoPlayerController.file(File(widget.url));
+    } else {
+      _videoController = VideoPlayerController.networkUrl(
+        Uri.parse(widget.url),
+      );
+    }
+
+    await _videoController!.initialize();
     if (!mounted) return;
-    final val = _controller.value;
+
+    setState(() {
+      _isInitialized = true;
+    });
+
+    // Report duration
+    final dur = _videoController!.value.duration;
+    widget.onVideoDuration?.call(dur > Duration.zero ? dur : null);
+
+    _videoController!.play();
+    widget.onStarted?.call(widget.docId);
+
+    _videoController!.addListener(_onVideoControllerUpdate);
+  }
+
+  void _onVideoControllerUpdate() {
+    if (!mounted || _videoController == null) return;
+    final val = _videoController!.value;
 
     if (!val.isInitialized) return;
     final duration = val.duration;
-    if (duration <= Duration(milliseconds: 500)) return;
+    if (duration <= const Duration(milliseconds: 500)) return;
 
     final position = val.position;
     widget.onProgress?.call(
@@ -125,11 +183,12 @@ class _VideoGridItemState extends State<VideoGridItem> {
 
     // Check if video is near the end
     const margin = Duration(milliseconds: 200);
-    if (!_onCompletedCalled && widget.videoDuration == null) {
+    // Use widget.duration if provided and valid? usually video uses its own length.
+    // Logic: if position >= duration - margin
+    if (!_onCompletedCalled) {
       if (position >= duration - margin) {
         _onCompletedCalled = true;
-        // Pass stable videoId
-        widget.onCompleted?.call(widget.videoId);
+        widget.onCompleted?.call(widget.docId);
         WidgetsBinding.instance.addPostFrameCallback((_) {
           widget.onDurationComplete();
         });
@@ -139,9 +198,7 @@ class _VideoGridItemState extends State<VideoGridItem> {
 
   @override
   void dispose() {
-    _controller.removeListener(_onControllerUpdate);
-    _controller.pause();
-    _controller.dispose();
+    _disposeControllers();
     super.dispose();
   }
 
@@ -151,9 +208,21 @@ class _VideoGridItemState extends State<VideoGridItem> {
       return const Center(child: CircularProgressIndicator());
     }
 
+    if (widget.type == 'image') {
+      final isLocal = widget.url.startsWith('/');
+      return Container(
+        color: Colors.black,
+        child: SizedBox.expand(
+          child: isLocal
+              ? Image.file(File(widget.url), fit: BoxFit.contain)
+              : Image.network(widget.url, fit: BoxFit.contain),
+        ),
+      );
+    }
+
     return Container(
       color: Colors.black,
-      child: SizedBox.expand(child: VideoPlayer(_controller)),
+      child: SizedBox.expand(child: VideoPlayer(_videoController!)),
     );
   }
 }
@@ -183,7 +252,6 @@ class AdaptiveVideoGrid extends StatefulWidget {
 class _AdaptiveVideoGridState extends State<AdaptiveVideoGrid> {
   late PageController _pageController;
   int _currentIndex = 0;
-  double _currentProgress = 0.0;
   // Removed blocking loader state variables
 
   @override
@@ -207,22 +275,21 @@ class _AdaptiveVideoGridState extends State<AdaptiveVideoGrid> {
   @override
   void didUpdateWidget(AdaptiveVideoGrid oldWidget) {
     super.didUpdateWidget(oldWidget);
-    
+
     // Use listEquals to prevent unnecessary resets if the content is effectively the same
     final urlsChanged = !listEquals(widget.videoUrls, oldWidget.videoUrls);
-    
-    // Only reset if URLs actually changed and it's not just a reference change 
+
+    // Only reset if URLs actually changed and it's not just a reference change
     if (urlsChanged) {
       // If the length changed or content changed significantly, we might need to reset.
       // But if it's just a local path update in place, we should try to keep position.
       if (widget.videoUrls.length != oldWidget.videoUrls.length) {
-         _pageController.dispose();
-         _pageController = PageController();
-         _currentIndex = 0;
-         _currentProgress = 0.0;
+        _pageController.dispose();
+        _pageController = PageController();
+        _currentIndex = 0;
       } else {
-         // Length is same, probably just a path update (network -> local). Keep index.
-         // Do not dispose controller.
+        // Length is same, probably just a path update (network -> local). Keep index.
+        // Do not dispose controller.
       }
     }
   }
@@ -241,24 +308,26 @@ class _AdaptiveVideoGridState extends State<AdaptiveVideoGrid> {
       return;
     }
 
-    // Checking globally if downloading might be overkill; 
+    // Checking globally if downloading might be overkill;
     // we can just fire and forget download for cache.
     // Logic here was updating state for blocking loader. We removed blocking loader.
-    
+
     try {
-      final localPath = await VideoSync.instance.downloadSingleVideo(
+      final type = item['type'];
+      final localPath = await VideoSync.instance.downloadSingleFile(
         docId!,
         url,
+        type: type,
       );
       if (localPath != null) {
         // Update the URL in the parent's items list (in-place)
         if (mounted) {
-          // This triggers parent rebuild if parent is listening to this structure, 
+          // This triggers parent rebuild if parent is listening to this structure,
           // or we force valid path usage next build
           widget.videoItems![index]['path'] = localPath;
-          
+
           // Re-trigger build to switch to local file
-          setState(() {}); 
+          setState(() {});
         }
       }
     } catch (e) {
@@ -299,105 +368,55 @@ class _AdaptiveVideoGridState extends State<AdaptiveVideoGrid> {
       _currentIndex = 0;
     }
 
-    return Stack(
-      children: [
-        Column(
-          children: [
-            Expanded(
-              child: Stack(
-                children: [
-                  PageView.builder(
-                    controller: _pageController,
-                    physics: const BouncingScrollPhysics(),
-                    onPageChanged: (index) {
-                      setState(() {
-                        _currentIndex = index;
-                        _currentProgress = 0.0;
-                      });
-                      // Trigger download for the new page
-                      _downloadIfNeeded(index);
+    return PageView.builder(
+      controller: _pageController,
+      physics: const BouncingScrollPhysics(),
+      onPageChanged: (index) {
+        setState(() {
+          _currentIndex = index;
+        });
+        // Trigger download for the new page
+        _downloadIfNeeded(index);
 
-                      // Handle swipe wrap-around
-                      if (index == 0 && _currentIndex == 0) {
-                         WidgetsBinding.instance.addPostFrameCallback((_) {
-                          if (_pageController.hasClients) {
-                            final page = _pageController.page ?? 0.0;
-                            if (page < -0.5) {
-                              _pageController.jumpToPage(
-                                widget.videoUrls.length - 1,
-                              );
-                            }
-                          }
-                        });
-                      }
-                    },
-                    itemCount: widget.videoUrls.length,
-                    itemBuilder: (context, index) {
-                      final item = widget.videoItems?[index];
-                      // Use the path from item if available (contains updated local path), else fallback to url list
-                      final videoUrl = item?['path'] ?? widget.videoUrls[index];
-                      // Fallback if item structure is broken
-                      final docId = item?['docId'] ?? 'unknown_$index';
-                      
-                      return VideoGridItem(
-                        videoUrl: videoUrl,
-                        videoId: docId, // Pass ID explicitly
-                        videoDuration: widget.videoDuration,
-                        onStarted: widget.onVideoStarted,
-                        onCompleted: widget.onVideoCompleted,
-                        onDurationComplete: _goToNextPage,
-                        onProgress: (progress) {
-                          setState(() {
-                            _currentProgress = progress;
-                          });
-                        },
-                        onVideoDuration: widget.onVideoDuration,
-                      );
-                    },
-                  ),
-                  // Dot indicator in bottom right corner
-                  Positioned(
-                    bottom: 20, 
-                    right: 20,
-                    child: Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: Colors.black26,
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: List.generate(
-                          widget.videoUrls.length,
-                          (index) => Container(
-                            margin: const EdgeInsets.symmetric(horizontal: 4),
-                            width: 8,
-                            height: 8,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: index == _currentIndex
-                                  ? Colors.white
-                                  : Colors.white.withValues(alpha: 0.4),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            // Progress bar at bottom
-            LinearProgressIndicator(
-              value: _currentProgress,
-              minHeight: 3,
-              backgroundColor: Colors.grey[300],
-              valueColor: AlwaysStoppedAnimation<Color>(Colors.blue.shade400),
-            ),
-          ],
-        ),
-         // Removed the blocking container that was here
-      ],
+        // Handle swipe wrap-around
+        if (index == 0 && _currentIndex == 0) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (_pageController.hasClients) {
+              final page = _pageController.page ?? 0.0;
+              if (page < -0.5) {
+                _pageController.jumpToPage(widget.videoUrls.length - 1);
+              }
+            }
+          });
+        }
+      },
+      itemCount: widget.videoUrls.length,
+      itemBuilder: (context, index) {
+        final item = widget.videoItems?[index];
+        // Use the path from item if available (contains updated local path), else fallback to url list
+        final url = item?['path'] ?? widget.videoUrls[index];
+        final docId = item?['docId'] ?? 'unknown_$index';
+        final type = item?['type'] ?? 'video';
+        final durationStr = item?['duration'];
+        final duration = int.tryParse(durationStr ?? '10') ?? 10;
+
+        return FileGridItem(
+          url: url,
+          docId: docId,
+          type: type,
+          duration: duration,
+          onStarted: widget.onVideoStarted,
+          onCompleted: widget.onVideoCompleted,
+          onDurationComplete: _goToNextPage,
+          onProgress: (progress) {
+            // Progress update if needed for UI in grid item itself?
+            // Since we removed _currentProgress usage from parent, we can just ignore it or remove the callback.
+            // But FileGridItem expects it. We can keep it empty or use it if we want a global progress bar.
+            // For now just empty or keep local to avoid breaking changes if planned to use later.
+          },
+          onVideoDuration: widget.onVideoDuration,
+        );
+      },
     );
   }
 }
