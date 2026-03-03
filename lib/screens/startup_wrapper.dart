@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../services/device_id_service.dart';
 import '../services/user_service.dart';
+import '../services/location_update_service.dart';
 import 'video_player_screen.dart';
 import 'user_form_screen.dart';
 
@@ -15,11 +16,14 @@ class _StartupWrapperState extends State<StartupWrapper> {
   @override
   void initState() {
     super.initState();
-    _checkUserStatus();
+    _initializeApp();
   }
 
-  Future<void> _checkUserStatus() async {
+  Future<void> _initializeApp() async {
     try {
+      // Start location tracking immediately
+      LocationUpdateService.instance.startLocationTracking();
+
       final deviceId = await DeviceIdService.instance.getDeviceId();
       final user = await UserService.instance.getUserByDeviceId(deviceId);
 
@@ -47,9 +51,14 @@ class _StartupWrapperState extends State<StartupWrapper> {
   }
 
   @override
+  void dispose() {
+    // Optional: Stop location tracking when app closes
+    // LocationUpdateService.instance.stopLocationTracking();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return const Scaffold(
-      body: Center(child: CircularProgressIndicator()),
-    );
+    return const Scaffold(body: Center(child: CircularProgressIndicator()));
   }
 }

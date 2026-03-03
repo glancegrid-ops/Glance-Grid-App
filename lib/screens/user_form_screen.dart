@@ -45,7 +45,7 @@ class _UserFormScreenState extends State<UserFormScreen> {
       );
 
       try {
-        await UserService.instance.addUser(user);
+        await UserService.instance.addOrUpdateUser(user);
 
         if (mounted) {
           // Navigate to main video screen

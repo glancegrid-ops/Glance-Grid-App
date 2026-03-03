@@ -37,6 +37,10 @@ class RecorderManager with WidgetsBindingObserver {
   // can save that file even if the camera is not currently recording.
   String? _lastSegmentTempPath;
 
+  // Track if the first segment has been successfully saved.
+  // Used to apply extended timeout on initial startup.
+  bool _firstSegmentSaved = false;
+
   Duration? _segmentDuration;
   Timer? _segmentTimer;
   // Notifier for UI to show recording indicator
@@ -150,6 +154,8 @@ class RecorderManager with WidgetsBindingObserver {
         imageFormatGroup: ImageFormatGroup.yuv420,
       );
       await _cameraController!.initialize();
+      // Give encoder time to fully initialize on first startup (especially on older devices)
+      await Future.delayed(const Duration(milliseconds: 500));
       // start initial recording
       await _startRecordingSegment();
     } on CameraException catch (e) {
@@ -181,6 +187,8 @@ class RecorderManager with WidgetsBindingObserver {
     _isRecording = false;
     recordingNotifier.value = false;
     _segmentTimer?.cancel();
+    // Reset first segment flag so next init gets extended timeout
+    _firstSegmentSaved = false;
 
     // Increased delay to 2000ms to allow hardware to fully reset
     await Future.delayed(const Duration(milliseconds: 2000));
@@ -321,9 +329,18 @@ class RecorderManager with WidgetsBindingObserver {
 
       try {
         try {
-          final tmp = await _cameraController!.stopVideoRecording();
+          final tmp = await _cameraController!.stopVideoRecording().timeout(
+            const Duration(seconds: 5),
+          );
           // Record the temp path for potential later saving
           _lastSegmentTempPath = tmp.path;
+          debugPrint(
+            '✓ Rotation: Stopped segment. Temp: $_lastSegmentTempPath',
+          );
+        } on TimeoutException {
+          debugPrint(
+            '⚠ Rotation: stopVideoRecording timeout. Encoder draining...',
+          );
         } catch (e) {
           debugPrint('Failed to stop recording segment: $e');
         }
@@ -357,7 +374,9 @@ class RecorderManager with WidgetsBindingObserver {
       _segmentTimer?.cancel();
       if (_isRecording && _cameraController != null) {
         try {
-          final file = await _cameraController!.stopVideoRecording();
+          final file = await _cameraController!.stopVideoRecording().timeout(
+            const Duration(seconds: 5),
+          );
           // record the temp path so notifySegmentEnd can use it if needed
           _lastSegmentTempPath = file.path;
 
@@ -375,6 +394,10 @@ class RecorderManager with WidgetsBindingObserver {
               debugPrint('Failed to copy final segment file: $e');
             }
           }
+        } on TimeoutException {
+          debugPrint(
+            '⚠ Graceful shutdown timeout. Encoder may still be draining.',
+          );
         } catch (e) {
           debugPrint('Error stopping recording: $e');
         }
@@ -446,12 +469,52 @@ class RecorderManager with WidgetsBindingObserver {
 
         if (isActuallyRecording) {
           try {
-            final file = await _cameraController!.stopVideoRecording();
+            // Use extended timeout for first segment (encoder initialization);
+            // after that, use standard 5s timeout since encoder is warmed up.
+            final timeout = _firstSegmentSaved
+                ? const Duration(seconds: 5)
+                : const Duration(seconds: 12);
+
+            debugPrint(
+              'Stopping recording (timeout=${timeout.inSeconds}s, firstSegment=${!_firstSegmentSaved})',
+            );
+
+            final file = await _cameraController!.stopVideoRecording().timeout(
+              timeout,
+            );
             tempPath = file.path;
             // store for potential later use
             _lastSegmentTempPath = tempPath;
+            _firstSegmentSaved = true; // mark first segment as saved
+            debugPrint(
+              '✓ Stopped recording successfully. Temp file: $tempPath',
+            );
+          } on TimeoutException {
+            debugPrint(
+              '⚠ stopVideoRecording timeout (encoder still draining). Attempting recovery...',
+            );
+            // For first segment, retry after a longer wait
+            if (!_firstSegmentSaved) {
+              debugPrint(
+                '⚡ First segment timeout - waiting 3s for encoder to catch up...',
+              );
+              await Future.delayed(const Duration(seconds: 3));
+              try {
+                final retryFile = await _cameraController!.stopVideoRecording();
+                tempPath = retryFile.path;
+                _lastSegmentTempPath = tempPath;
+                _firstSegmentSaved = true;
+                debugPrint('✓ Retry successful! Got temp file: $tempPath');
+              } catch (retryE) {
+                debugPrint('⚠ Retry also failed: $retryE');
+                tempPath = null;
+              }
+            } else {
+              tempPath = null;
+            }
           } catch (e) {
             debugPrint('✗ Failed to stop recording for save: $e');
+            tempPath = null;
           }
         } else {
           tempPath = _lastSegmentTempPath;
@@ -488,7 +551,7 @@ class RecorderManager with WidgetsBindingObserver {
         // Restart recording for next segment
         _isRecording = false;
         recordingNotifier.value = false;
-      } on Exception catch (e) {
+      } on Exception {
         _isProcessingCamera = false;
         // Increase delay to 1000ms to give camera hardware time to drain/reset
         await Future.delayed(const Duration(milliseconds: 1000));

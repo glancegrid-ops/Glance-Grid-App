@@ -101,29 +101,28 @@ class _ClipBrowserScreenState extends State<ClipBrowserScreen> {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder:
-          (_) => const Dialog(
-            child: Padding(
-              padding: EdgeInsets.all(20),
-              child: Row(
-                children: [
-                  CircularProgressIndicator(),
-                  SizedBox(width: 20),
-                  Text('Downloading...'),
-                ],
-              ),
-            ),
+      builder: (_) => const Dialog(
+        child: Padding(
+          padding: EdgeInsets.all(20),
+          child: Row(
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(width: 20),
+              Text('Downloading...'),
+            ],
           ),
+        ),
+      ),
     );
 
     int successCount = 0;
     try {
       // Check permissions implicitly by trying or could use Gal.hasAccess() if needed.
-       // Gal requests permissions automatically on Android/iOS if not granted.
-       for (final path in _selectedPaths) {
-         await Gal.putVideo(path); // Save video
-         successCount++;
-       }
+      // Gal requests permissions automatically on Android/iOS if not granted.
+      for (final path in _selectedPaths) {
+        await Gal.putVideo(path); // Save video
+        successCount++;
+      }
     } catch (e) {
       debugPrint('Download error: $e');
     }
@@ -137,33 +136,87 @@ class _ClipBrowserScreenState extends State<ClipBrowserScreen> {
     }
   }
 
+  /// Delete all selected clips after asking the user to confirm.
+  Future<void> _deleteSelected() async {
+    if (_selectedPaths.isEmpty) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete selected clips?'),
+        content: Text(
+          'Are you sure you want to delete ${_selectedPaths.length} selected clip(s)? This action cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    int deletedCount = 0;
+    for (final path in _selectedPaths) {
+      try {
+        final f = File(path);
+        if (await f.exists()) {
+          await f.delete();
+          deletedCount++;
+        }
+      } catch (e) {
+        debugPrint('Error deleting file $path: $e');
+      }
+    }
+    if (mounted) {
+      _exitSelectionMode();
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Deleted $deletedCount clip(s)')));
+      _refresh();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        leading:
-            _isSelectionMode
-                ? IconButton(
-                  icon: const Icon(Icons.close),
-                  onPressed: _exitSelectionMode,
-                )
-                : null,
-        title: Text(_isSelectionMode ? '${_selectedPaths.length}' : 'Saved Clips'),
-        actions:
-            _isSelectionMode
-                ? [
-                  IconButton(
-                    icon: const Icon(Icons.select_all),
-                    onPressed: _selectAll,
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.download),
-                    onPressed: _downloadSelected,
-                  ),
-                ]
-                : [
-                  IconButton(icon: const Icon(Icons.refresh), onPressed: _refresh),
-                ],
+        leading: _isSelectionMode
+            ? IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: _exitSelectionMode,
+              )
+            : null,
+        title: Text(
+          _isSelectionMode ? '${_selectedPaths.length}' : 'Saved Clips',
+        ),
+        actions: _isSelectionMode
+            ? [
+                IconButton(
+                  icon: const Icon(Icons.select_all),
+                  onPressed: _selectAll,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.download),
+                  onPressed: _downloadSelected,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete),
+                  tooltip: 'Delete selected',
+                  onPressed: _deleteSelected,
+                ),
+              ]
+            : [
+                IconButton(
+                  icon: const Icon(Icons.refresh),
+                  onPressed: _refresh,
+                ),
+              ],
       ),
       body: Builder(
         builder: (context) {
@@ -204,66 +257,64 @@ class _ClipBrowserScreenState extends State<ClipBrowserScreen> {
                     _toggleSelection(f.path);
                   }
                 },
-                trailing:
-                    _isSelectionMode
-                        ? Checkbox(
-                          value: isSelected,
-                          onChanged: (v) => _toggleSelection(f.path),
-                        )
-                        : Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              icon: const Icon(Icons.delete),
-                              onPressed: () async {
-                                final confirmed = await showDialog<bool>(
-                                  context: ctx,
-                                  builder:
-                                      (dialogCtx) => AlertDialog(
-                                        title: const Text('Delete clip?'),
-                                        content: Text('Delete "$name"?'),
-                                        actions: [
-                                          TextButton(
-                                            onPressed:
-                                                () => Navigator.pop(dialogCtx, false),
-                                            child: const Text('Cancel'),
-                                          ),
-                                          TextButton(
-                                            onPressed:
-                                                () => Navigator.pop(dialogCtx, true),
-                                            child: const Text('Delete'),
-                                          ),
-                                        ],
+                trailing: _isSelectionMode
+                    ? Checkbox(
+                        value: isSelected,
+                        onChanged: (v) => _toggleSelection(f.path),
+                      )
+                    : Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.delete),
+                            onPressed: () async {
+                              final confirmed = await showDialog<bool>(
+                                context: ctx,
+                                builder: (dialogCtx) => AlertDialog(
+                                  title: const Text('Delete clip?'),
+                                  content: Text('Delete "$name"?'),
+                                  actions: [
+                                    TextButton(
+                                      onPressed: () =>
+                                          Navigator.pop(dialogCtx, false),
+                                      child: const Text('Cancel'),
+                                    ),
+                                    TextButton(
+                                      onPressed: () =>
+                                          Navigator.pop(dialogCtx, true),
+                                      child: const Text('Delete'),
+                                    ),
+                                  ],
+                                ),
+                              );
+                              if (confirmed == true) {
+                                try {
+                                  await f.delete();
+                                  _refresh();
+                                } catch (e) {
+                                  if (mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text('Delete failed'),
                                       ),
-                                );
-                                if (confirmed == true) {
-                                  try {
-                                    await f.delete();
-                                    _refresh();
-                                  } catch (e) {
-                                    if (mounted) {
-                                      ScaffoldMessenger.of(context).showSnackBar(
-                                        const SnackBar(
-                                          content: Text('Delete failed'),
-                                        ),
-                                      );
-                                    }
+                                    );
                                   }
                                 }
-                              },
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.open_in_new),
-                              onPressed: () {
-                                Navigator.of(ctx).push(
-                                  MaterialPageRoute(
-                                    builder: (_) => ClipPlayerScreen(file: f),
-                                  ),
-                                );
-                              },
-                            ),
-                          ],
-                        ),
+                              }
+                            },
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.open_in_new),
+                            onPressed: () {
+                              Navigator.of(ctx).push(
+                                MaterialPageRoute(
+                                  builder: (_) => ClipPlayerScreen(file: f),
+                                ),
+                              );
+                            },
+                          ),
+                        ],
+                      ),
               );
             },
           );

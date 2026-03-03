@@ -5,43 +5,32 @@ class UserService {
   static final UserService instance = UserService._internal();
   UserService._internal();
 
-  final CollectionReference _usersCollection =
-      FirebaseFirestore.instance.collection('users');
+  final CollectionReference _usersCollection = FirebaseFirestore.instance
+      .collection('users');
 
-  Future<void> addUser(UserModel user) async {
-    // Check if user with this deviceId already exists
-    final querySnapshot = await _usersCollection
-        .where('deviceId', isEqualTo: user.deviceId)
-        .limit(1)
-        .get();
-
-    if (querySnapshot.docs.isNotEmpty) {
-      // Update existing
-      final docId = querySnapshot.docs.first.id;
-      await _usersCollection.doc(docId).update(user.toJson());
-    } else {
-      // Add new
-      await _usersCollection.add(user.toJson());
+  /// Create or update a user document using `deviceId` as the Firestore document ID.
+  /// This ensures the user's document ID equals their device identifier.
+  Future<void> addOrUpdateUser(UserModel user) async {
+    final docId = user.deviceId;
+    if (docId.isEmpty) {
+      throw ArgumentError('deviceId cannot be empty');
     }
+    await _usersCollection
+        .doc(docId)
+        .set(user.toJson(), SetOptions(merge: true));
   }
 
+  /// Retrieve a user by deviceId (used as the document ID).
   Future<UserModel?> getUserByDeviceId(String deviceId) async {
-    final querySnapshot = await _usersCollection
-        .where('deviceId', isEqualTo: deviceId)
-        .limit(1)
-        .get();
-
-    if (querySnapshot.docs.isNotEmpty) {
-      final doc = querySnapshot.docs.first;
-      return UserModel.fromJson(
-        doc.data() as Map<String, dynamic>,
-        id: doc.id,
-      );
-    }
-    return null;
+    if (deviceId.isEmpty) return null;
+    final doc = await _usersCollection.doc(deviceId).get();
+    if (!doc.exists) return null;
+    return UserModel.fromJson(doc.data() as Map<String, dynamic>, id: doc.id);
   }
 
-  Future<void> deleteUser(String id) async {
-    await _usersCollection.doc(id).delete();
+  /// Delete a user document by deviceId (document ID).
+  Future<void> deleteUserByDeviceId(String deviceId) async {
+    if (deviceId.isEmpty) return;
+    await _usersCollection.doc(deviceId).delete();
   }
 }

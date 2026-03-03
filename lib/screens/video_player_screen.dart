@@ -29,21 +29,19 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
     _initScreenSettings();
     _videoItems = [];
 
-    // Initialize things after frame
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _checkPassword();
+    // Initialize things after frame. Wait for the password dialog to be
+    // dismissed before loading videos so playback doesn't start underneath it.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _checkPassword(); // await dismissal of the dialog
+
+      // Initialize recorder (may prompt permissions) regardless of password result
       RecorderManager.instance.init(context);
 
-      // Load videos when recorder is ready (or if already ready)
-      RecorderManager.instance.readyNotifier.addListener(() {
-        if (RecorderManager.instance.readyNotifier.value) {
-          _loadVideos();
-        }
-      });
+      // Load videos only after the dialog has been dismissed.
+      _loadVideos();
 
-      if (RecorderManager.instance.readyNotifier.value) {
-        _loadVideos();
-      }
+      // Keep listener for future permission changes (no-op for now)
+      RecorderManager.instance.readyNotifier.addListener(() {});
     });
   }
 
@@ -75,7 +73,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
     try {
       final deviceId = await DeviceIdService.instance.getDeviceId();
       final videos = await VideoService.instance.fetchVideosForDevice(deviceId);
-
       final items = videos
           .map(
             (v) => {
