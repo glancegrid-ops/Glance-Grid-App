@@ -87,6 +87,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
           )
           .toList();
 
+      debugPrint('Loaded video items: $items');
+
       if (mounted) {
         setState(() {
           _videoItems = items;

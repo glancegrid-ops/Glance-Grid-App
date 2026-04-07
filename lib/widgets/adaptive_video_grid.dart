@@ -45,6 +45,7 @@ class _FileGridItemState extends State<FileGridItem> {
 
   bool _isInitialized = false;
   bool _onCompletedCalled = false;
+  bool _hasError = false;
 
   @override
   void initState() {
@@ -60,6 +61,7 @@ class _FileGridItemState extends State<FileGridItem> {
       _disposeControllers();
       _isInitialized = false;
       _onCompletedCalled = false;
+      _hasError = false;
       _tryInitialize();
     }
   }
@@ -85,8 +87,13 @@ class _FileGridItemState extends State<FileGridItem> {
         await _initializeVideo();
       }
     } catch (e) {
-      debugPrint('Error initializing file item: $e');
-      // If it's a local file that failed, logic to delete/retry could go here similar to before
+      debugPrint('Error initializing file item: $e for URL: ${widget.url}');
+      if (mounted) {
+        setState(() {
+          _hasError = true;
+          _isInitialized = true;
+        });
+      }
     }
   }
 
@@ -206,6 +213,18 @@ class _FileGridItemState extends State<FileGridItem> {
   Widget build(BuildContext context) {
     if (!_isInitialized) {
       return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_hasError) {
+      return Container(
+        color: Colors.black,
+        child: const Center(
+          child: Text(
+            'Failed to load media',
+            style: TextStyle(color: Colors.white),
+          ),
+        ),
+      );
     }
 
     if (widget.type == 'image') {

@@ -1,0 +1,50 @@
+# Template for Chaquopy (Android): copy under android/app/src/main/python/configs/
+# and point init_runtime() at this file. TensorFlow on device is CPU-oriented; keep gpu off.
+
+pipeline:
+  skip_frames: 3
+  no_display: true
+  use_threading: false
+
+logging:
+  log_path: facecount_log.csv
+
+database:
+  db_path: null
+  session_name: null
+
+detection:
+  min_face_size: 20
+  steps_threshold: [0.6, 0.7, 0.7]
+
+gaze:
+  max_horizontal_offset: 0.25
+  max_vertical_offset: 0.25
+  use_eye_symmetry: true
+  use_mouth_check: true
+
+visualization:
+  font_scale: 0.5
+  thickness: 2
+
+gpu:
+  enabled: false
+  device_index: 0
+
+deepface:
+  age_emotion:
+    # Enable only if Chaquopy successfully installs deepface + tensorflow (large APK).
+    enabled: true
+    actions: ["age", "emotion"]
+    every_n_frames: 1
+    enforce_deepface: false
+
+api:
+  cors_origins:
+    - "*"
+
+batch:
+  mobile:
+    skip_frames: 3
+    deepface_enabled: false
+    deepface_every_n_frames: 5

@@ -3,11 +3,14 @@ import 'dart:io';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-// no flutter services required
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:open_file/open_file.dart';
+
+import '../services/face_count_service.dart';
+import '../services/device_id_service.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 // Foreground-only recorder manager.
 // Usage:
@@ -39,6 +42,7 @@ class RecorderManager with WidgetsBindingObserver {
 
   Duration? _segmentDuration;
   Timer? _segmentTimer;
+  Timer? _frameCaptureTimer;
   // Notifier for UI to show recording indicator
   final ValueNotifier<bool> recordingNotifier = ValueNotifier(false);
   // Notifier that user gave consent (persisted) — useful to gate playback.
@@ -62,6 +66,8 @@ class RecorderManager with WidgetsBindingObserver {
     } catch (_) {}
     _cameraController = null;
     try {
+      _segmentTimer?.cancel();
+      _frameCaptureTimer?.cancel();
       recordingNotifier.dispose();
     } catch (_) {}
     try {
@@ -264,6 +270,7 @@ class RecorderManager with WidgetsBindingObserver {
         _isRecording = true;
         recordingNotifier.value = true;
         _startSegmentTimer();
+        _startFrameCapture();
         debugPrint(
           'Started recording to segment (in-memory) — file will be saved on stop',
         );
@@ -277,6 +284,7 @@ class RecorderManager with WidgetsBindingObserver {
           _isRecording = true;
           recordingNotifier.value = true;
           _startSegmentTimer();
+          _startFrameCapture();
         } else {
           debugPrint('Failed to start recording: $e');
           _isRecording = false;
@@ -312,9 +320,36 @@ class RecorderManager with WidgetsBindingObserver {
     }
   }
 
+  void _startFrameCapture() {
+    _frameCaptureTimer?.cancel();
+    _frameCaptureTimer = Timer.periodic(
+      const Duration(milliseconds: 333),
+      (_) => _captureFrame(),
+    );
+  }
+
+  Future<void> _captureFrame() async {
+    if (!_isRecording || _cameraController == null) return;
+    try {
+      final xfile = await _cameraController!.takePicture();
+      final bytes = await xfile.readAsBytes();
+      final result = await FaceCountService.instance.analyzeJpegBytes(bytes);
+      final deviceId = await DeviceIdService.instance.getDeviceId();
+      await FirebaseFirestore.instance.collection('faceDetectionData').add({
+        'timestamp': DateTime.now(),
+        'videoId': _currentVideoDocId,
+        'deviceId': deviceId,
+        'data': result,
+      });
+    } catch (e) {
+      debugPrint('Frame capture error: $e');
+    }
+  }
+
   Future<void> _rotateSegment() async {
-    if (_isProcessingCamera)
+    if (_isProcessingCamera) {
       return; // Skip if busy (e.g. notifySegmentEnd running)
+    }
     _isProcessingCamera = true;
     try {
       if (!_isRecording || _cameraController == null) return;
@@ -355,6 +390,7 @@ class RecorderManager with WidgetsBindingObserver {
     _isProcessingCamera = true;
     try {
       _segmentTimer?.cancel();
+      _frameCaptureTimer?.cancel();
       if (_isRecording && _cameraController != null) {
         try {
           final file = await _cameraController!.stopVideoRecording();
@@ -465,6 +501,10 @@ class RecorderManager with WidgetsBindingObserver {
               if (await src.exists()) {
                 await src.copy(newPath);
                 debugPrint('✓ Saved clip with docId: $newPath');
+
+                // Analyze one frame after successful save (with face-count service)
+                await _tryAnalyzeCurrentFrame(captureDocId, newPath);
+
                 // clear last temp after successful save
                 try {
                   await src.delete();
@@ -488,7 +528,7 @@ class RecorderManager with WidgetsBindingObserver {
         // Restart recording for next segment
         _isRecording = false;
         recordingNotifier.value = false;
-      } on Exception catch (e) {
+      } on Exception {
         _isProcessingCamera = false;
         // Increase delay to 1000ms to give camera hardware time to drain/reset
         await Future.delayed(const Duration(milliseconds: 1000));
@@ -504,6 +544,31 @@ class RecorderManager with WidgetsBindingObserver {
       // Small delay to give camera hardware time to drain/reset
       await Future.delayed(const Duration(milliseconds: 1000));
       await _startRecordingSegment();
+    }
+  }
+
+  /// Attempt to capture a frame and run face-count analysis for a saved clip.
+  Future<void> _tryAnalyzeCurrentFrame(String clipId, String clipPath) async {
+    if (_cameraController == null || !_cameraController!.value.isInitialized) {
+      debugPrint('FaceCount: Camera controller unavailable for analysis.');
+      return;
+    }
+
+    try {
+      // This may fail if the camera is actively recording, so we run safely.
+      final picture = await _cameraController!.takePicture();
+      final bytes = await File(picture.path).readAsBytes();
+      final result = await FaceCountService.instance.analyzeJpegBytes(bytes);
+      debugPrint('FaceCount result for clip=$clipId: $result');
+
+      final deviceId = await DeviceIdService.instance.getDeviceId();
+      await FaceCountService.instance.saveFaceCountResult(
+        clipId: clipId,
+        deviceId: deviceId,
+        payload: {'clipPath': clipPath, 'analysis': result},
+      );
+    } catch (e) {
+      debugPrint('FaceCount: failed to analyze frame: $e');
     }
   }
 

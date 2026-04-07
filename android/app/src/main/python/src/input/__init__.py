@@ -1,0 +1,2 @@
+"""Input (video capture) abstractions."""
+

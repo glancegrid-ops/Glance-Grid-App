@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/device_id_service.dart';
+import '../services/face_count_service.dart';
 import '../services/user_service.dart';
 import 'video_player_screen.dart';
 import 'user_form_screen.dart';
@@ -20,6 +21,8 @@ class _StartupWrapperState extends State<StartupWrapper> {
 
   Future<void> _checkUserStatus() async {
     try {
+      await FaceCountService.instance.initRuntime();
+
       final deviceId = await DeviceIdService.instance.getDeviceId();
       final user = await UserService.instance.getUserByDeviceId(deviceId);
 
@@ -48,8 +51,6 @@ class _StartupWrapperState extends State<StartupWrapper> {
 
   @override
   Widget build(BuildContext context) {
-    return const Scaffold(
-      body: Center(child: CircularProgressIndicator()),
-    );
+    return const Scaffold(body: Center(child: CircularProgressIndicator()));
   }
 }
