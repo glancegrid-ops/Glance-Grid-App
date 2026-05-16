@@ -8,6 +8,7 @@ import '../models/file_model.dart'; // Import FileModel for FileType enum
 import '../services/device_id_service.dart';
 import 'clip_browser.dart';
 import '../helpers/ui_helpers.dart';
+import 'face_detection_list_screen.dart';
 
 class VideoPlayerScreen extends StatefulWidget {
   const VideoPlayerScreen({super.key});
@@ -154,6 +155,40 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
                               content: Text('Unable to open clips'),
+                            ),
+                          );
+                        }
+                      } catch (_) {}
+                    } finally {
+                      // Resume recording if it was active before navigation
+                      try {
+                        await RecorderManager.instance.resumeRecordingAfterUi();
+                      } catch (_) {}
+                    }
+                  },
+                ),
+                IconButton(
+                  tooltip: 'View face detection data',
+                  icon: const Icon(Icons.face),
+                  onPressed: () async {
+                    try {
+                      // Pause recorder while user browses data
+                      await RecorderManager.instance.pauseRecordingForUi();
+                      if (context.mounted) {
+                        await Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const FaceDetectionListScreen(),
+                          ),
+                        );
+                      }
+                    } catch (e) {
+                      try {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                'Unable to open face detection data',
+                              ),
                             ),
                           );
                         }

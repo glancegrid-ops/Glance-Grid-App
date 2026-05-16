@@ -11,6 +11,7 @@ import 'package:open_file/open_file.dart';
 import '../services/face_count_service.dart';
 import '../services/device_id_service.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 
 // Foreground-only recorder manager.
 // Usage:
@@ -335,11 +336,23 @@ class RecorderManager with WidgetsBindingObserver {
       final bytes = await xfile.readAsBytes();
       final result = await FaceCountService.instance.analyzeJpegBytes(bytes);
       final deviceId = await DeviceIdService.instance.getDeviceId();
+
+      // Upload image to Firebase Storage
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final storageRef = FirebaseStorage.instance.ref().child(
+        'face_frames/$deviceId/$timestamp.jpg',
+      );
+      final uploadTask = storageRef.putData(bytes);
+      final snapshot = await uploadTask.whenComplete(() {});
+      final downloadUrl = await snapshot.ref.getDownloadURL();
+
+      // Store in Firestore
       await FirebaseFirestore.instance.collection('faceDetectionData').add({
         'timestamp': DateTime.now(),
         'videoId': _currentVideoDocId,
         'deviceId': deviceId,
         'data': result,
+        'imageUrl': downloadUrl,
       });
     } catch (e) {
       debugPrint('Frame capture error: $e');
